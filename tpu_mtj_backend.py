@@ -400,6 +400,9 @@ pad_token_id = 50256
 def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_index, gen_length, rpslope, rprange, sampler_options):
     numseqs = numseqs_aux.shape[0]
     gi = data[0][1]
+    is_first_iteration = True
+    # Get stop token from arguments
+    stop_token = sampler_options.pop('stop_token', -1)
     def sample_loop_fn(carry):
         generated, generated_index, logits, _ = carry[0][0]
         sample_key = carry[1]
@@ -421,6 +424,10 @@ def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_
         # their logits to negative infinity which effectively
         # makes their probabilities of being chosen zero
         logits[badwords] = -np.inf
+        # If stop_token is a nonnegative integer, make sure the
+        # first token generated is never equal to stop_token
+        if is_first_iteration and stop_token >= 0 and np.isinf(logits).sum() < logits.size - 1:
+            logits[stop_token] = -np.inf
         # Use the sampler (kobold_sample_dynamic) to pick one token
         # based on the logits array as a 0D uint32 array
         # (higher logit means higher probability of being
@@ -444,8 +451,9 @@ def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_
     #     (data, key),
     # )
     carry = (data, key)
-    while carry[0][0][1] == gi:
+    while carry[0][0][1] == gi and carry[0][0][3] != stop_token:
         carry = sample_loop_fn(carry)
+        is_first_iteration = False
     return carry
 
 class PenalizingCausalTransformer(CausalTransformer):
@@ -479,6 +487,8 @@ class PenalizingCausalTransformer(CausalTransformer):
                 repetition_penalty = sampler_options.pop('repetition_penalty', None)
                 rpslope = sampler_options.pop('rpslope', None)
                 rprange = sampler_options.pop('rprange', None)
+                # Get stop token from arguments
+                stop_token = sampler_options.pop('stop_token', jnp.int32(-1))
                 # This is the main generation loop
                 def generate_loop_fn(carry):
                     # Unpack current generate_loop_fn state
@@ -515,6 +525,20 @@ class PenalizingCausalTransformer(CausalTransformer):
                     # their logits to negative infinity which effectively
                     # makes their probabilities of being chosen zero
                     logits = logits.at[self.badwords].set(-jnp.inf)
+                    # If stop_token is a nonnegative integer, make sure the
+                    # first token generated is never equal to stop_token
+                    logits = jax.lax.cond(
+                        jnp.logical_and(
+                            jnp.logical_and(
+                                generated_index == config["seq"],
+                                stop_token >= 0,
+                            ),
+                            jnp.isinf(logits).sum() < logits.size - 1,
+                        ),
+                        lambda logits: logits.at[stop_token].set(-jnp.inf),
+                        lambda logits: logits,
+                        logits,
+                    )
                     # Use the sampler (kobold_sample_static) to pick one token
                     # based on the logits array as a 0D uint32 array
                     # (higher logit means higher probability of being
@@ -533,7 +557,10 @@ class PenalizingCausalTransformer(CausalTransformer):
                     carry[0].append(carry[0].pop(0))
                     return carry[0], new_key
                 return jax.lax.while_loop(
-                    lambda carry: carry[0][0][1] - config["seq"] < gen_length,
+                    lambda carry: jnp.logical_and(
+                        carry[0][0][1] - config["seq"] < gen_length,  # stop generating when tokens generated exceeds gen length
+                        carry[0][0][3][0] != stop_token  # stop generating when stop token is generated
+                    ),
                     generate_loop_fn,
                     (initial_states, sample_key),
                 )
@@ -745,6 +772,7 @@ def infer_static(
     repetition_penalty=1.0,
     rpslope=0.0,
     rprange=0,
+    stop_token=-1,
     numseqs=1,
     gen_len=80,
     soft_embeddings: Optional[np.array] = None,
@@ -767,7 +795,8 @@ def infer_static(
         "repetition_penalty": repetition_penalty * np.ones(total_batch),
         "rpslope": rpslope * np.ones(total_batch),
         "rprange": np.full(total_batch, rprange, dtype=np.uint32),
-        "top_k": np.full(total_batch, top_k, dtype=np.uint32)
+        "top_k": np.full(total_batch, top_k, dtype=np.uint32),
+        "stop_token": np.full(total_batch, stop_token, dtype=np.int32),
     }
     output = network.generate_static(
         batched_tokens,

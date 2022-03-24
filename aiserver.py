@@ -154,6 +154,7 @@ class vars:
     top_p       = 0.9    # Default generator top_p
     top_k       = 0      # Default generator top_k
     tfs         = 1.0    # Default generator tfs (tail-free sampling)
+    stop_token  = -1     # (TPU backend only) Token that when generated causes generation to stop, or -1 for no stop token
     numseqs     = 1     # Number of sequences to ask the generator to create
     gamestarted = False  # Whether the game has started (disables UI elements)
     gamesaved   = True   # Whether or not current game is saved
@@ -1543,6 +1544,7 @@ else:
             "repetition_penalty": float(vars.rep_pen),
             "rpslope": float(vars.rep_pen_slope),
             "rprange": int(vars.rep_pen_range),
+            "stop_token": int(vars.stop_token),
         }
 
     # If we're running Colab or OAI, we still need a tokenizer.
@@ -3582,6 +3584,7 @@ def tpumtjgenerate(txt, minimum, maximum, found_entries=None):
                 repetition_penalty=vars.rep_pen,
                 rpslope=vars.rep_pen_slope,
                 rprange=vars.rep_pen_range,
+                stop_token=vars.stop_token,
                 soft_embeddings=vars.sp,
                 soft_tokens=soft_tokens,
             )

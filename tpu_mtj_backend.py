@@ -400,7 +400,6 @@ pad_token_id = 50256
 def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_index, gen_length, rpslope, rprange, sampler_options):
     numseqs = numseqs_aux.shape[0]
     gi = data[0][1]
-    is_first_iteration = True
     # Get stop token from arguments
     stop_token = sampler_options.pop('stop_token', -1)
     def sample_loop_fn(carry):
@@ -426,7 +425,7 @@ def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_
         logits[badwords] = -np.inf
         # If stop_token is a nonnegative integer, make sure the
         # first token generated is never equal to stop_token
-        if is_first_iteration and stop_token >= 0 and np.isinf(logits).sum() < logits.size - 1:
+        if generated_index == generated.shape[-1] // 2 and stop_token >= 0 and np.isinf(logits).sum() < logits.size - 1:
             logits[stop_token] = -np.inf
         # Use the sampler (kobold_sample_dynamic) to pick one token
         # based on the logits array as a 0D uint32 array
@@ -451,9 +450,8 @@ def sample_func(data, key, numseqs_aux, badwords, repetition_penalty, generated_
     #     (data, key),
     # )
     carry = (data, key)
-    while carry[0][0][1] == gi and carry[0][0][3] != stop_token:
+    while carry[0][0][1] == gi:
         carry = sample_loop_fn(carry)
-        is_first_iteration = False
     return carry
 
 class PenalizingCausalTransformer(CausalTransformer):
@@ -807,7 +805,8 @@ def infer_static(
         soft_embeddings=soft_embeddings,
     )[0]
     for o in output:
-        samples.append(o[0][0, 0, params["seq"] : params["seq"] + gen_len])
+        print(params["seq"], o[1][0, 0])
+        samples.append(o[0][0, 0, params["seq"] : o[1][0, 0]])
     return samples
 
 

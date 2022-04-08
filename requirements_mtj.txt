@@ -8,7 +8,7 @@ jax == 0.2.21
 transformers >= 4.17
 progressbar2
 git+https://github.com/VE-FORBRYDERNE/mesh-transformer-jax@ck
-flask
+flask >= 2.1.0
 Flask-SocketIO
 flask-cloudflared >= 0.0.5
 flask-ngrok

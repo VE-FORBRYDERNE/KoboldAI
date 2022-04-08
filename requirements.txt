@@ -1,5 +1,5 @@
 transformers>=4.17
-Flask
+Flask>=2.1.0
 Flask-SocketIO
 requests
 torch==1.11

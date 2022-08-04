@@ -14,6 +14,8 @@ dependencies:
   - git=2.35.1
   - sentencepiece
   - protobuf
+  - uvicorn
+  - fastapi
   - pip:
     - --find-links https://download.pytorch.org/whl/rocm4.2/torch_stable.html
     - torch==1.10.*
@@ -23,3 +25,4 @@ dependencies:
     - lupa==1.10
     - transformers>=4.20.1
     - accelerate
+    - asgiproxy

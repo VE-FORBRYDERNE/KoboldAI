@@ -16,8 +16,11 @@ dependencies:
   - bleach=4.1.0
   - pip
   - git=2.35.1
+  - uvicorn
+  - fastapi
   - pip:
     - git+https://github.com/finetuneanon/transformers@gpt-neo-localattention3-rp-b
     - flask-cloudflared
     - flask-ngrok
     - lupa==1.10
+    - asgiproxy

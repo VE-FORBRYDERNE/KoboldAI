@@ -12,6 +12,8 @@ dependencies:
   - bleach=4.1.0
   - pip
   - git=2.35.1
+  - uvicorn
+  - fastapi
   - pip:
     - --find-links https://download.pytorch.org/whl/rocm4.2/torch_stable.html
     - torch
@@ -20,3 +22,4 @@ dependencies:
     - git+https://github.com/finetuneanon/transformers@gpt-neo-localattention3-rp-b
     - flask-ngrok
     - lupa==1.10
+    - asgiproxy

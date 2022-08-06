@@ -17,7 +17,6 @@ dependencies:
   - git=2.35.1
   - sentencepiece
   - protobuf
-  - uvicorn
   - fastapi
   - pip:
     - flask-cloudflared
@@ -25,4 +24,4 @@ dependencies:
     - lupa==1.10
     - transformers>=4.20.1
     - accelerate
-    - asgiproxy
+    - a2wsgi

@@ -50,11 +50,9 @@ import importlib
 
 # FastAPI and dependencies
 from fastapi import FastAPI, Query
-from starlette.applications import Starlette
-from starlette.routing import Mount
-from asgiproxy.config import BaseURLProxyConfigMixin, ProxyConfig
-from asgiproxy.context import ProxyContext
-from asgiproxy.simple_proxy import make_simple_proxy_app
+from werkzeug.middleware.dispatcher import DispatcherMiddleware
+import a2wsgi.asgi
+from a2wsgi import ASGIMiddleware
 
 # KoboldAI
 import fileops
@@ -99,6 +97,14 @@ def new_pretrainedtokenizerbase_from_pretrained(cls, *args, **kwargs):
     tokenizer.add_prefix_space = False
     return tokenizer
 PreTrainedTokenizerBase.from_pretrained = new_pretrainedtokenizerbase_from_pretrained
+
+# Fix a bug in a2wsgi's ASGIMiddleware where it throws an error if we visit a /api URL with no query string in it
+old_build_scope = a2wsgi.asgi.build_scope
+def new_build_scope(environ, *args, **kwargs):
+    if("QUERY_STRING" not in environ):
+        environ["QUERY_STRING"] = ""
+    return old_build_scope(environ, *args, **kwargs)
+a2wsgi.asgi.build_scope = new_build_scope
 
 #==================================================================#
 # Variables & Storage
@@ -377,10 +383,6 @@ class Send_to_socketio(object):
 import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
-uvicorn_error = logging.getLogger("uvicorn.error")
-uvicorn_error.disabled = True
-uvicorn_access = logging.getLogger("uvicorn.access")
-uvicorn_access.disabled = True
 
 # Start flask & SocketIO
 print("{0}Initializing Flask... {1}".format(colors.PURPLE, colors.END), end="")
@@ -6456,20 +6458,13 @@ async def example(test: Union[float, None] = Query(default=None, title="Title", 
 #==================================================================#
 #  Final startup commands to launch Flask app
 #==================================================================#
-upstream = "http://127.0.0.1:6899"
-proxy_app = make_simple_proxy_app(ProxyContext(type("Config", (BaseURLProxyConfigMixin, ProxyConfig), {"upstream_base_url": upstream})()))
-starlette_app = Starlette(routes=[
-    Mount("/api/v1", api_v1),
-    Mount("/api/latest", api_v1),
-    Mount("/", proxy_app),
-])
-
-def start_uvicorn_server(*args, **kwargs):
-    from uvicorn.server import Server
-    from uvicorn.config import Config
-    server = Server(Config(*args, **kwargs))
-    server.force_exit=True
-    server.run()
+_app = app
+app = DispatcherMiddleware(app.wsgi_app, {
+    "/api/v1": ASGIMiddleware(api_v1),
+    "/api/latest": ASGIMiddleware(api_v1),
+})
+app.debug = _app.debug
+app.root_path = _app.root_path
 
 print("", end="", flush=True)
 if __name__ == "__main__":
@@ -6516,8 +6511,7 @@ if __name__ == "__main__":
             print("{0}Webserver has started, you can now connect to this machine at port {1}{2}"
                   .format(colors.GREEN, port, colors.END))
         vars.serverstarted = True
-        threading.Thread(daemon=True, target=socketio.run, args=(app,), kwargs={"port": 6899}).start()
-        start_uvicorn_server(starlette_app, host='0.0.0.0', port=port)
+        socketio.run(app, host='0.0.0.0', port=port)
     else:
         if args.unblock:
             import webbrowser
@@ -6525,8 +6519,7 @@ if __name__ == "__main__":
             print("{0}Server started!\nYou may now connect with a browser at http://127.0.0.1:{1}/{2}"
                   .format(colors.GREEN, port, colors.END))
             vars.serverstarted = True
-            threading.Thread(daemon=True, target=socketio.run, args=(app,), kwargs={"port": 6899}).start()
-            start_uvicorn_server(starlette_app, host='0.0.0.0', port=port)
+            socketio.run(app, port=port, host='0.0.0.0')
         else:
             try:
                 from flaskwebgui import FlaskUI
@@ -6540,8 +6533,7 @@ if __name__ == "__main__":
                 print("{0}Server started!\nYou may now connect with a browser at http://127.0.0.1:{1}/{2}"
                         .format(colors.GREEN, port, colors.END))
                 vars.serverstarted = True
-                threading.Thread(daemon=True, target=socketio.run, args=(app,), kwargs={"port": 6899}).start()
-                start_uvicorn_server(starlette_app, host='127.0.0.1', port=port)
+                socketio.run(app, port=port)
 
 else:
     general_startup()
@@ -6550,6 +6542,4 @@ else:
     if vars.model == "" or vars.model is None:
         vars.model = "ReadOnly"
     load_model(initial_load=True)
-    print("{0}\nServer started in ASGI mode!{1}".format(colors.GREEN, colors.END), flush=True)
-    vars.serverstarted = True
-    threading.Thread(daemon=True, target=socketio.run, args=(app,), kwargs={"port": 6899}).start()
+    print("{0}\nServer started in WSGI mode!{1}".format(colors.GREEN, colors.END), flush=True)

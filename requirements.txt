@@ -13,6 +13,5 @@ sentencepiece
 protobuf
 accelerate
 flask-session
-uvicorn
 fastapi
-asgiproxy
+a2wsgi

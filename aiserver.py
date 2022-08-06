@@ -37,7 +37,7 @@ import bisect
 import functools
 import traceback
 from collections.abc import Iterable
-from typing import Any, Callable, TypeVar, Tuple, Union, Dict, Set, List
+from typing import Any, Callable, TypeVar, Tuple, Union, Dict, Set, List, Optional
 
 import requests
 import html
@@ -49,7 +49,9 @@ import lupa
 import importlib
 
 # FastAPI and dependencies
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, Field
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 import a2wsgi.asgi
 from a2wsgi import ASGIMiddleware
@@ -366,6 +368,10 @@ class vars:
     use_colab_tpu = os.environ.get("COLAB_TPU_ADDR", "") != "" or os.environ.get("TPU_NAME", "") != ""  # Whether or not we're in a Colab TPU instance or Kaggle TPU instance and are going to use the TPU rather than the CPU
     revision    = None
     output_streaming = False
+    standalone = False
+    disable_set_aibusy = False
+    disable_input_formatting = False
+    disable_output_formatting = False
     token_stream_queue = [] # Queue for the token streaming
 
 utils.vars = vars
@@ -1608,13 +1614,16 @@ def patch_transformers():
             scores: torch.FloatTensor,
             **kwargs,
         ) -> bool:
+            print("CALLED", vars.generated_tkns)
             vars.generated_tkns += 1
-            if(vars.lua_koboldbridge.generated_cols and vars.generated_tkns != vars.lua_koboldbridge.generated_cols):
+            if(not vars.standalone and vars.lua_koboldbridge.generated_cols and vars.generated_tkns != vars.lua_koboldbridge.generated_cols):
                 raise RuntimeError(f"Inconsistency detected between KoboldAI Python and Lua backends ({vars.generated_tkns} != {vars.lua_koboldbridge.generated_cols})")
             if(vars.abort or vars.generated_tkns >= vars.genamt):
                 self.regeneration_required = False
                 self.halt = False
                 return True
+            if(vars.standalone):
+                return False
 
             assert input_ids.ndim == 2
             assert len(self.excluded_world_info) == input_ids.shape[0]
@@ -3602,7 +3611,7 @@ def sendsettings():
 def setgamesaved(gamesaved):
     assert type(gamesaved) is bool
     if(gamesaved != vars.gamesaved):
-        emit('from_server', {'cmd': 'gamesaved', 'data': gamesaved}, broadcast=True)
+        socketio.emit('from_server', {'cmd': 'gamesaved', 'data': gamesaved}, broadcast=True)
     vars.gamesaved = gamesaved
 
 #==================================================================#
@@ -3780,6 +3789,103 @@ def actionsubmit(data, actionmode=0, force_submit=False, force_prompt_gen=False,
                 set_aibusy(0)
                 emit('from_server', {'cmd': 'scrolldown', 'data': ''}, broadcast=True)
                 break
+
+def actionsubmitstandalone_generate(txt, minimum, maximum):
+    vars.generated_tkns = 0
+
+    if not vars.quiet:
+        print("{0}Min:{1}, Max:{2}, Txt:{3}{4}".format(colors.YELLOW, minimum, maximum, utils.decodenewlines(tokenizer.decode(txt)), colors.END))
+
+    # Clear CUDA cache if using GPU
+    if(vars.hascuda and (vars.usegpu or vars.breakmodel)):
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    # Submit input text to generator
+    _genout, already_generated = tpool.execute(_generate, txt, minimum, maximum, set())
+    print(1)
+
+    genout = [applyoutputformatting(utils.decodenewlines(tokenizer.decode(tokens[-already_generated:]))) for tokens in _genout]
+    print(2)
+
+    # Clear CUDA cache again if using GPU
+    if(vars.hascuda and (vars.usegpu or vars.breakmodel)):
+        del _genout
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    return genout
+
+def actionsubmitstandalone_tpumtjgenerate(txt, minimum, maximum):
+    vars.generated_tkns = 0
+
+    if(vars.full_determinism):
+        tpu_mtj_backend.set_rng_seed(vars.seed)
+
+    if not vars.quiet:
+        print("{0}Min:{1}, Max:{2}, Txt:{3}{4}".format(colors.YELLOW, minimum, maximum, utils.decodenewlines(tokenizer.decode(txt)), colors.END))
+
+    vars._actions = vars.actions
+    vars._prompt = vars.prompt
+    if(vars.dynamicscan):
+        vars._actions = vars._actions.copy()
+
+    # Submit input text to generator
+    soft_tokens = tpumtjgetsofttokens()
+    genout = tpool.execute(
+        tpu_mtj_backend.infer_static,
+        np.uint32(txt),
+        gen_len = maximum-minimum+1,
+        temp=vars.temp,
+        top_p=vars.top_p,
+        top_k=vars.top_k,
+        tfs=vars.tfs,
+        typical=vars.typical,
+        top_a=vars.top_a,
+        numseqs=vars.numseqs,
+        repetition_penalty=vars.rep_pen,
+        rpslope=vars.rep_pen_slope,
+        rprange=vars.rep_pen_range,
+        soft_embeddings=vars.sp,
+        soft_tokens=soft_tokens,
+        sampler_order=vars.sampler_order,
+    )
+    genout = [applyoutputformatting(utils.decodenewlines(tokenizer.decode(txt))) for txt in genout]
+
+    return genout
+
+def actionsubmitstandalone(data):
+    # Ignore new submissions if the AI is currently busy
+    if(vars.aibusy):
+        return
+    
+    if(vars.model == "Colab"):
+        raise NotImplementedError("standalone generation is not supported in old Colab API mode")
+    elif(vars.model == "OAI"):
+        raise NotImplementedError("standalone generation is not supported in OpenAI/GooseAI mode")
+    elif(vars.model == "ReadOnly"):
+        raise NotImplementedError("standalone generation is not supported in read-only mode; please load a model and then try again")
+
+    if(vars.memory != "" and vars.memory[-1] != "\n"):
+        mem = vars.memory + "\n"
+    else:
+        mem = vars.memory
+    tokens = tokenizer.encode(utils.encodenewlines(mem))[-(vars.max_length - vars.sp_length - vars.genamt - len(tokenizer._koboldai_header)):]
+    tokens += tokenizer.encode(utils.encodenewlines(data))[-(vars.max_length - vars.sp_length - vars.genamt - len(tokenizer._koboldai_header) - len(tokens)):]
+    tokens = tokenizer._koboldai_header + tokens
+    minimum = len(tokens) + 1
+    maximum = len(tokens) + vars.genamt
+
+    if(not vars.use_colab_tpu and vars.model not in ["Colab", "OAI", "TPUMeshTransformerGPTJ", "TPUMeshTransformerGPTNeoX"]):
+        genout = actionsubmitstandalone_generate(tokens, minimum, maximum)
+    elif(vars.use_colab_tpu or vars.model in ("TPUMeshTransformerGPTJ", "TPUMeshTransformerGPTNeoX")):
+        genout = actionsubmitstandalone_tpumtjgenerate(tokens, minimum, maximum)
+
+    genout = [applyoutputformatting(txt) for txt in genout]
+
+    return genout
+
+
 
 #==================================================================#
 #  
@@ -4176,7 +4282,7 @@ def _generate(txt, minimum, maximum, found_entries):
             maximum += diff
             gen_in = genout
             numseqs = 1
-    
+    print(3)
     return genout, already_generated
     
 
@@ -4741,6 +4847,8 @@ def refresh_settings():
 #  Sets the logical and display states for the AI Busy condition
 #==================================================================#
 def set_aibusy(state):
+    if(vars.disable_set_aibusy):
+        return
     if(state):
         vars.aibusy = True
         emit('from_server', {'cmd': 'setgamestate', 'data': 'wait'}, broadcast=True)
@@ -6435,23 +6543,320 @@ def get_files_folders(starting_folder):
 
 
 
+class RouteErrorHandler(APIRoute):
+    def get_route_handler(self):
+        original_route_handler = super().get_route_handler()
+        async def route_handler(request):
+            try:
+                return await original_route_handler(request)
+            except Exception as e:
+                if isinstance(e, HTTPException):
+                    raise e
+                elif any (s in traceback.format_exc().lower() for s in ("out of memory", "not enough memory")):
+                    for line in traceback.format_exc():
+                        if any(s in line.lower() for s in ("out of memory", "not enough memory")):
+                            line = re.sub(r"\[.+?\] +data\.", "", line).strip()
+                            raise HTTPException(status_code=507, detail={
+                                "msg": line,
+                                "type": "koboldai.out_of_memory_gpu_cuda" if "cuda out of memory" in line.lower() else "koboldai.out_of_memory_gpu_hip" if "hip out of memory" in line.lower() else "koboldai.out_of_memory_tpu_hbm" if "memory space hbm" in line.lower() else "koboldai.out_of_memory_cpu" if "defaultmemoryallocator" in line.lower() else "koboldai.out_of_memory_unknown",
+                            })
+                        raise HTTPException(status_code=507, detail={
+                            "msg": "KoboldAI model server ran out of memory",
+                            "type": "koboldai.out_of_memory_unknown",
+                        })
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail={
+                    "msg": str(e),
+                    "type": str(e.__class__.__name__),
+                })
+        return route_handler
+
 common_metadata = [
     {
-        "name": "Example tag",
-        "description": "Example description.",
-        "externalDocs": {
-            "description": "Example external docs",
-            "url": "https://example.com/",
-        },
+        "name": "completion",
+        "description": "Text generation and utilities for managing story chunks.",
     },
 ]
 
+class BasicDetail(BaseModel):
+    msg: str
+    type: str
 
-api_v1 = FastAPI(root_path="/api/v1", title="KoboldAI API", version="1.0.0", openapi_tags=common_metadata)
+class UnhandledPythonError(BaseModel):
+    detail: BasicDetail
+    class Config:
+        schema_extra = {
+            "example": {
+                "detail": {
+                    "msg": "integer division or modulo by zero",
+                    "type": "ZeroDivisionError",
+                }
+            }
+        }
 
-@api_v1.get("/hello", tags=["Example tag"], summary="Example summary", description="Example description.")
-async def example(test: Union[float, None] = Query(default=None, title="Title", description="Description")):
-    return {"message": "Hello World" + repr(test)}
+class ServiceUnavailableError(BaseModel):
+    detail: BasicDetail
+    class Config:
+        schema_extra = {
+            "example": {
+                "detail": {
+                    "msg": "server is busy, please try again later",
+                    "type": "koboldai.service_unavailable",
+                }
+            }
+        }
+
+class ServiceNotImplementedError(BaseModel):
+    detail: BasicDetail
+    class Config:
+        schema_extra = {
+            "example": {
+                "detail": {
+                    "msg": "<error message>",
+                    "type": "koboldai.not_implemented",
+                }
+            }
+        }
+
+class OutOfMemoryError(BaseModel):
+    detail: BasicDetail
+
+unhandled_python_error = {
+    500: {"model": UnhandledPythonError, "description": "Unhandled Python Error"}
+}
+
+out_of_memory_error = {
+    507: {"model": OutOfMemoryError, "description": "Out Of Memory", "content": {"application/json": {"examples": {
+        "cuda": {
+            "value": {
+                "detail": {
+                    "msg": "CUDA out of memory. Tried to allocate 20.00 MiB (GPU 0; 4.00 GiB total capacity; 2.97 GiB already allocated; 0 bytes free; 2.99 GiB reserved in total by PyTorch)",
+                    "type": "koboldai.out_of_memory_gpu_cuda",
+                }
+            }
+        },
+        "hip": {
+            "value": {
+                "detail": {
+                    "msg": "HIP out of memory. Tried to allocate 20.00 MiB (GPU 0; 4.00 GiB total capacity; 2.97 GiB already allocated; 0 bytes free; 2.99 GiB reserved in total by PyTorch)",
+                    "type": "koboldai.out_of_memory_gpu_hip",
+                }
+            }
+        },
+        "hbm": {
+            "value": {
+                "detail": {
+                    "msg": "Compilation failed: Compilation failure: Ran out of memory in memory space hbm. Used 8.83G of 8.00G hbm. Exceeded hbm capacity by 848.88M.",
+                    "type": "koboldai.out_of_memory_tpu_hbm",
+                }
+            }
+        },
+        "cpu": {
+            "value": {
+                "detail": {
+                    "msg": "DefaultCPUAllocator: not enough memory: you tried to allocate 209715200 bytes.",
+                    "type": "koboldai.out_of_memory_cpu",
+                }
+            }
+        },
+        "generic": {
+            "value": {
+                "detail": {
+                    "msg": "KoboldAI model server ran out of memory",
+                    "type": "koboldai.out_of_memory_unknown",
+                }
+            }
+        },
+    }}}},
+}
+
+
+_api_v1 = FastAPI(root_path="/api/v1", title="KoboldAI API", version="1.0.0", openapi_tags=common_metadata)
+api_v1 = APIRouter(route_class=RouteErrorHandler)
+
+
+class SamplerSettingsModel(BaseModel):
+    rep_pen: Optional[float] = Field(ge=1, title="Repetition penalty", description="Base repetition penalty value.")
+    rep_pen_range: Optional[int] = Field(ge=0, title="Repetition penalty range", description="Repetition penalty range.")
+    rep_pen_slope: Optional[float] = Field(ge=0, title="Repetition penalty slope", description="Repetition penalty slope.")
+    top_k: Optional[int] = Field(ge=0, title="Top-k sampling", description="Top-k sampling value.")
+    top_a: Optional[float] = Field(ge=0, title="Top-a sampling", description="Top-a sampling value.")
+    top_p: Optional[float] = Field(ge=0, le=1, title="Top-p sampling", description="Top-p sampling value.")
+    tfs: Optional[float] = Field(ge=0, le=1, title="Tail free sampling", description="Tail free sampling value.")
+    typical: Optional[float] = Field(ge=0, le=1, title="Typical sampling", description="Typical sampling value.")
+    temperature: Optional[float] = Field(gt=0, title="Temperature", description="Temperature value.")
+
+
+class BaseInput(BaseModel):
+    prompt: str = Field(title="Prompt", description="This is the submission.")
+    disable_output_formatting: Optional[bool] = Field(title="Disable output formatting", default=True, description="When enabled, disables all 'output formatting' options, overriding their individual enabled/disabled states.")
+    frmttriminc: Optional[bool] = Field(title="Output formatting: Trim incomplete sentences", description="When enabled, removes some characters from the end of the output such that the output doesn't end in the middle of a sentence. If the output is less than one sentence long, does nothing.")
+    frmtrmblln: Optional[bool] = Field(title="Output formatting: Remove blank lines", description="When enabled, replaces all occurrences of two or more consecutive newlines in the output with one newline.")
+    frmtrmspch: Optional[bool] = Field(title="Output formatting: Remove special characters", description="When enabled, removes `#/@%{}+=~|\^<>` from the output.")
+    singleline: Optional[bool] = Field(title="Output formatting: Single line", description="When enabled, removes everything after the first line of the output, including the newline.")
+    standalone: Optional[bool] = Field(default=False, title="Standalone mode", description=
+        "Whether or not we are generating in standalone mode."
+        " When used in standalone mode, this generates text using only your submission and soft prompt and then returns the result without modifying the story in the KoboldAI GUI."
+        " When standalone mode is off, this generates text using your memory, world info, story, soft prompt and submission to generate text and then appends the result at the end of your story, which is the behaviour in the KoboldAI GUI."
+    )
+
+class GenerateTextStandaloneInput(SamplerSettingsModel, BaseInput):
+    class Config:
+        schema_extra = {
+            "example": {
+                "prompt": "Explosions of suspicious origin occur at AMNAT satellite-receiver stations from Turkey to Labrador as three high-level Canadian defense ministers vanish and then a couple of days later are photographed at a Volgograd bistro hoisting shots of Stolichnaya with Slavic bimbos on their knee.",
+                "top_p": 0.9,
+                "temperature": 0.5,
+            }
+        }
+
+class BaseInput2(BaseInput):
+    disable_output_formatting: Optional[bool] = Field(title="Disable output formatting", default=False, description="When enabled, disables all 'output formatting' options, overriding their individual enabled/disabled states.")
+    disable_input_formatting: Optional[bool] = Field(title="Disable input formatting", default=False, description="When enabled, disables all 'input formatting' options, overriding their individual enabled/disabled states.")
+    frmtadsnsp: Optional[bool] = Field(title="Input formatting: Add sentence spacing", description="When enabled, adds a leading space to your input if there is no trailing whitespace at the end of the previous action.")
+
+class GenerateTextInput(SamplerSettingsModel, BaseInput2, BaseInput):
+    class Config:
+        schema_extra = {
+            "example": {
+                "prompt": "Explosions of suspicious origin occur at AMNAT satellite-receiver stations from Turkey to Labrador as three high-level Canadian defense ministers vanish and then a couple of days later are photographed at a Volgograd bistro hoisting shots of Stolichnaya with Slavic bimbos on their knee.",
+                "disable_output_formatting": True,
+                "top_p": 0.9,
+                "temperature": 0.5,
+            }
+        }
+
+class GenerateTextOutput(BaseModel):
+    class GenerateTextOutputResult(BaseModel):
+        text: str = Field(description="Generated output as a string.")
+    results: List[GenerateTextOutputResult] = Field(description="Array of generated outputs.")
+    class Config:
+        schema_extra = {
+            "example": {
+                "results": [
+                    {"text": " It is later established that all of the cabinet members have died of old age.\nMEGAMATRIX becomes involved in the growing number of mass abductions and kidnappings. Many disappearances occur along highways in western Canada, usually when traffic has come to a standstill because of a stalled truck or snowstorm. One or two abducted individuals will be released within a day or so but never"}
+                ]
+            }
+        }
+
+async def _generate_text(body: Union[GenerateTextStandaloneInput, GenerateTextInput], standalone: bool):
+    if vars.aibusy:
+        raise HTTPException(status_code=503, detail={
+            "type": "koboldai.service_unavailable",
+            "msg": "server is busy, please try again later",
+        })
+    mapping = {
+        "rep_pen": (vars, "rep_pen"),
+        "rep_pen_range": (vars, "rep_pen_range"),
+        "rep_pen_slope": (vars, "rep_pen_slope"),
+        "top_k": (vars, "top_k"),
+        "top_a": (vars, "top_a"),
+        "top_p": (vars, "top_p"),
+        "tfs": (vars, "tfs"),
+        "typical": (vars, "typical"),
+        "temperature": (vars, "temp"),
+        "frmtadnsp": (vars.formatoptns, "@frmtadnsp"),
+        "frmttriminc": (vars.formatoptns, "@frmttriminc"),
+        "frmtrmblln": (vars.formatoptns, "@frmtrmblln"),
+        "frmtrmspch": (vars.formatoptns, "@frmtrmspch"),
+        "singleline": (vars.formatoptns, "@singleline"),
+        "disable_input_formatting": (vars, "disable_input_formatting"),
+        "disable_output_formatting": (vars, "disable_output_formatting"),
+    }
+    saved_settings = {}
+    disable_set_aibusy = vars.disable_set_aibusy
+    vars.disable_set_aibusy = True
+    if standalone:
+        _standalone = vars.standalone
+        vars.standalone = True
+    set_aibusy(1)
+    for key, entry in mapping.items():
+        if getattr(body, key, None) is not None:
+            if entry[1].startswith("@"):
+                saved_settings[key] = entry[0][entry[1][1:]]
+                entry[0][entry[1][1:]] = getattr(body, key)
+            else:
+                saved_settings[key] = getattr(entry[0], entry[1])
+                setattr(entry[0], entry[1], getattr(body, key))
+    try:
+        if not standalone:
+            with app.test_request_context():
+                actionsubmit(body.prompt, force_submit=True, force_prompt_gen=True)
+        else:
+            try:
+                genout = actionsubmitstandalone(body.prompt)
+            except NotImplementedError as e:
+                raise HTTPException(status_code=501, detail={
+                    "msg": str(e).strip(),
+                    "type": "koboldai.not_implemented",
+                })
+            output = {"results": [{"text": txt} for txt in genout]}
+    finally:
+        for key in saved_settings:
+            entry = mapping[key]
+            if getattr(body, key, None) is not None:
+                if entry[1].startswith("@"):
+                    if entry[0][entry[1][1:]] == getattr(body, key):
+                        entry[0][entry[1][1:]] = saved_settings[key]
+                else:
+                    if getattr(entry[0], entry[1]) == getattr(body, key):
+                        setattr(entry[0], entry[1], saved_settings[key])
+        set_aibusy(0)
+        vars.disable_set_aibusy = disable_set_aibusy
+        if standalone:
+            vars.standalone = _standalone
+    return output
+
+# @api_v1.post(
+#     "/completion/prompt",
+#     tags=["completion"],
+#     summary="Generate text in standalone mode",
+#     description=
+#         "Generate text given a submission, sampler settings and number of return sequences."
+#         "\n\nWhen used in standalone mode, this generates text using only your submission and soft prompt and then returns the result without modifying the story in the KoboldAI GUI."
+#         " When standalone mode is off, this generates text using your memory, world info, story, soft prompt and submission to generate text and then appends the result at the end of your story, which is the behaviour in the KoboldAI GUI."
+#         "\n\nUnless otherwise specified, optional values default to the value in the KoboldAI GUI.",
+#     responses={**{
+#         200: {"model": GenerateTextOutput},
+#         501: {"model": ServiceNotImplementedError, "description": "Not Implemented"},
+#         503: {"model": ServiceUnavailableError, "description": "Service Unavailable (the model is busy generating something else)"},
+#     }, **out_of_memory_error, **unhandled_python_error},
+# )
+
+@api_v1.post(
+    "/completion/prompt",
+    tags=["completion"],
+    summary="Generate text using your story and then append to story",
+    description=
+        "Generate text given a submission, sampler settings and number of return sequences."
+        "\n\nThis generates text using your memory, world info, story, soft prompt, author's note and submission to generate text and then appends the result at the end of your story, which is the behaviour in the KoboldAI GUI."
+        "\n\nUnless otherwise specified, optional values default to the value in the KoboldAI GUI.",
+   
+ responses={**{
+        200: {"model": GenerateTextOutput},
+        501: {"model": ServiceNotImplementedError, "description": "Not Implemented"},
+        503: {"model": ServiceUnavailableError, "description": "Service Unavailable (the model is busy generating something else)"},
+    }, **out_of_memory_error, **unhandled_python_error},
+)
+async def generate_text(body: GenerateTextInput):
+    await _generate_text(body, False)
+
+@api_v1.post(
+    "/completion/standalone",
+    tags=["completion"],
+    summary="Generate text in standalone mode",
+    description=
+        "Generate text given a submission, sampler settings and number of return sequences."
+        "\n\nThis generates text using only your submission, memory and soft prompt and then returns the result without modifying the story in the KoboldAI GUI."
+        "\n\nUnless otherwise specified, optional values default to the value in the KoboldAI GUI.",
+    responses={**{
+        200: {"model": GenerateTextOutput},
+        501: {"model": ServiceNotImplementedError, "description": "Not Implemented"},
+        503: {"model": ServiceUnavailableError, "description": "Service Unavailable (the model is busy generating something else)"},
+    }, **out_of_memory_error, **unhandled_python_error},
+)
+async def generate_text(body: GenerateTextInput):
+    await _generate_text(body, True)
 
 
 
@@ -6459,9 +6864,10 @@ async def example(test: Union[float, None] = Query(default=None, title="Title", 
 #  Final startup commands to launch Flask app
 #==================================================================#
 _app = app
+_api_v1.include_router(api_v1)
 app = DispatcherMiddleware(app.wsgi_app, {
-    "/api/v1": ASGIMiddleware(api_v1),
-    "/api/latest": ASGIMiddleware(api_v1),
+    "/api/v1": ASGIMiddleware(_api_v1),
+    "/api/latest": ASGIMiddleware(_api_v1),
 })
 app.debug = _app.debug
 app.root_path = _app.root_path

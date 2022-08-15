@@ -607,7 +607,7 @@ tags = [
 api_version = None  # This gets set automatically so don't change this value
 
 api_v1 = KoboldAPISpec(
-    version="1.1.4",
+    version="1.2.0",
     prefixes=["/api/v1", "/api/latest"],
     tags=tags,
 )
@@ -7175,7 +7175,7 @@ class StoryChunkSchema(StoryNumsChunkSchema, KoboldSchema):
 class StorySchema(KoboldSchema):
     results: List[StoryChunkSchema] = fields.List(fields.Nested(StoryChunkSchema), required=True, metadata={"description": "Array of story actions. The array is sorted such that actions closer to the end of this array are closer to the end of the story."})
 
-class BasicBooleanSchema(KoboldSchema):
+class BasicBooleanResultSchema(KoboldSchema):
     result: bool = fields.Boolean(required=True)
 
 class StoryNumsSchema(KoboldSchema):
@@ -7427,6 +7427,38 @@ def post_generate(body: GenerationInputSchema):
         {api_out_of_memory_response}
     """
     return _generate_text(body)
+
+
+@api_v1.post("/generate/abort")
+@api_schema_wrap
+def post_generate_abort(body: EmptySchema):
+    """---
+    post:
+      summary: Stop the current generation if there is one currently happening
+      tags:
+        - generate
+      description: |-2
+        This endpoint returns as soon as the abort command is received by the server. The server may take longer to actually stop the current generation.
+
+        The return value is whether or not there was a generation occurring.
+
+        Note: This does not work in Colab TPU instances unless you're using the slower dynamic TPU backend due to limitations with the static TPU backend.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: EmptySchema
+      responses:
+        200:
+          description: Successful request
+          content:
+            application/json:
+              schema: BasicBooleanResultSchema
+    """
+    if vars.aibusy or vars.genseqs:
+        vars.abort = True
+        return {"result": True}
+    return {"result": False}
 
 
 @api_v1.get("/model")
@@ -7781,7 +7813,7 @@ def get_story_nums_num(num: int):
           description: Successful request
           content:
             application/json:
-              schema: BasicBooleanSchema
+              schema: BasicBooleanResultSchema
     """
     if num == 0:
         return {"result": vars.gamestarted}
@@ -8179,7 +8211,7 @@ def get_world_info_uids_uid(uid: int):
           description: Successful request
           content:
             application/json:
-              schema: BasicBooleanSchema
+              schema: BasicBooleanResultSchema
     """
     return {"result": uid in vars.worldinfo_u and vars.worldinfo_u[uid]["init"]}
 
@@ -8312,7 +8344,7 @@ def get_world_info_folders_none_uids_uid(uid: int):
           description: Successful request
           content:
             application/json:
-              schema: BasicBooleanSchema
+              schema: BasicBooleanResultSchema
     """
     return {"result": uid in vars.worldinfo_u and vars.worldinfo_u[uid]["folder"] is None and vars.worldinfo_u[uid]["init"]}
 
@@ -8449,7 +8481,7 @@ def get_world_info_folders_folder_uid_uids_entry_uid(folder_uid: int, entry_uid:
           description: Successful request
           content:
             application/json:
-              schema: BasicBooleanSchema
+              schema: BasicBooleanResultSchema
     """
     return {"result": entry_uid in vars.worldinfo_u and vars.worldinfo_u[entry_uid]["folder"] == folder_uid and vars.worldinfo_u[entry_uid]["init"]}
 

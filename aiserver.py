@@ -917,6 +917,7 @@ def move_model_to_devices(model):
         for key, value in model.state_dict().items():
             target_dtype = torch.float32 if breakmodel.primary_device == "cpu" else torch.float16
             if(value.dtype is not target_dtype):
+                print(f"CONVERTING {key} ({type(value)}; {value.dtype} -> {target_dtype})")
                 accelerate.utils.set_module_tensor_to_device(model, key, target_dtype)
         disk_blocks = breakmodel.disk_blocks
         gpu_blocks = breakmodel.gpu_blocks
@@ -2363,6 +2364,7 @@ def load_model(use_gpu=True, gpu_layers=None, disk_layers=None, initial_load=Fal
                             num_tensors = len(device_map)
                         utils.bar = tqdm(total=num_tensors, desc=f"{colors.PURPLE}INIT{colors.END}       | Loading model tensors", file=Send_to_socketio())
 
+                    import bitsandbytes as bnb
                     with zipfile.ZipFile(f, "r") as z:
                         try:
                             last_storage_key = None
@@ -2390,8 +2392,8 @@ def load_model(use_gpu=True, gpu_layers=None, disk_layers=None, initial_load=Fal
                                 model_dict[key] = model_dict[key].materialize(f, map_location="cpu")
                                 if model_dict[key].dtype is torch.float32:
                                     vars.fp32_model = True
-                                if convert_to_float16 and breakmodel.primary_device != "cpu" and vars.hascuda and (vars.breakmodel or vars.usegpu) and model_dict[key].dtype is torch.float32:
-                                    model_dict[key] = model_dict[key].to(torch.float16)
+                                if convert_to_float16 and breakmodel.primary_device != "cpu" and vars.hascuda and (vars.breakmodel or vars.usegpu) and any(model_dict[key].dtype is t for t in (torch.float32, torch.float16)):
+                                    model_dict[key] = bnb.nn.Int8Params(model_dict[key].to(torch.float16), requires_grad=False, has_fp16_weights=False).to(device)
                                 if breakmodel.primary_device == "cpu" or (not vars.usegpu and not vars.breakmodel and model_dict[key].dtype is torch.float16):
                                     model_dict[key] = model_dict[key].to(torch.float32)
                                 if device == "shared":
@@ -2582,6 +2584,9 @@ def load_model(use_gpu=True, gpu_layers=None, disk_layers=None, initial_load=Fal
                         try:
                             model     = AutoModelForCausalLM.from_pretrained(vars.model, revision=vars.revision, cache_dir="cache", **lowmem)
                         except Exception as e:
+                            print("ERROR WHEN LOADING MODEL:")
+                            import traceback
+                            traceback.print_exc()
                             if("out of memory" in traceback.format_exc().lower()):
                                 raise RuntimeError("One of your GPUs ran out of memory when KoboldAI tried to load your model.")
                             model     = GPTNeoForCausalLM.from_pretrained(vars.model, revision=vars.revision, cache_dir="cache", **lowmem)

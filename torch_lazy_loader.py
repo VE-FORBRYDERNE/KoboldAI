@@ -225,7 +225,11 @@ def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, miss
             try:
                 with torch.no_grad():
                     #param.copy_(input_param)
-                    new_param = torch.nn.Parameter(input_param, requires_grad=param.requires_grad)  # This line is new
+                    import bitsandbytes as bnb  # This line is new
+                    if isinstance(input_param, bnb.nn.Int8Params):  # This line is new
+                        new_param = input_param  # This line is new
+                    else:  # This line is new
+                        new_param = torch.nn.Parameter(input_param, requires_grad=param.requires_grad)  # This line is new
                     if name in self._parameters:  # This line is new
                         self._parameters[name] = new_param  # This line is new
                     if name in persistent_buffers:  # This line is new
@@ -303,12 +307,23 @@ def use_lazy_torch_load(enable=True, callback: Optional[Callable] = None, demate
                 init_empty_weights = accelerate.init_empty_weights()
                 init_empty_weights.__enter__()
             else:
+                import accelerate
+                import bitsandbytes as bnb
                 old_linear_init = torch.nn.Linear.__init__
                 old_embedding_init = torch.nn.Embedding.__init__
                 old_layernorm_init = torch.nn.LayerNorm.__init__
 
                 def linear_init(self, *args, device=None, **kwargs):
-                    return old_linear_init(self, *args, device="meta", **kwargs)
+                    if linear_init.nested_flag:
+                        return old_linear_init(self, *args, device=device, **kwargs)
+                    linear_init.nested_flag = True
+                    try:
+                        self.__class__ = bnb.nn.Linear8bitLt
+                        with accelerate.init_empty_weights():
+                            return bnb.nn.Linear8bitLt.__init__(self, *args, has_fp16_weights=False, threshold=6.0, **kwargs)
+                    finally:
+                        linear_init.nested_flag = False
+                linear_init.nested_flag = False
 
                 def embedding_init(self, *args, device=None, **kwargs):
                     return old_embedding_init(self, *args, device="meta", **kwargs)

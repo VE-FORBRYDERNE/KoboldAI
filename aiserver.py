@@ -2414,7 +2414,7 @@ def load_model(use_gpu=True, gpu_layers=None, disk_layers=None, initial_load=Fal
                                 if model_dict[key].dtype is torch.float32:
                                     vars.fp32_model = True
                                 if convert_to_float16 and breakmodel.primary_device != "cpu" and vars.hascuda and (vars.breakmodel or vars.usegpu) and any(model_dict[key].dtype is t for t in (torch.float32, torch.float16)):
-                                    model_dict[key] = bnb.nn.Int8Params(model_dict[key].to(torch.float16), requires_grad=False, has_fp16_weights=False).to(device)
+                                    model_dict[key] = bnb.nn.Int8Params(model_dict[key].to(torch.float16), requires_grad=False, has_fp16_weights=False).to(device if device not in ("shared", "disk") else "cpu")
                                 if breakmodel.primary_device == "cpu" or (not vars.usegpu and not vars.breakmodel and model_dict[key].dtype is torch.float16):
                                     model_dict[key] = model_dict[key].to(torch.float32)
                                 if device == "shared":

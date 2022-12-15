@@ -51,7 +51,7 @@ class AdvancedRepetitionPenaltyLogitsProcessor(LogitsWarper):
                     self.penalty = _penalty[..., -clipped_penalty_range:]
 
             score = torch.gather(scores, 1, input_ids)
-            score = torch.where(score <= 0, score * self.penalty, score / self.penalty)
+            score = score - torch.log(self.penalty)
             scores.scatter_(1, input_ids, score)
 
         return scores

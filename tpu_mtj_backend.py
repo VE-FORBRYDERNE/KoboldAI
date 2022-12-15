@@ -180,11 +180,7 @@ def apply_repetition_penalty_dynamic(logits, tokens, repetition_penalty, generat
     # with negative logits to become more likely, which is obviously wrong)
     penalty_logits = np.where(
         penalty_arange >= 0,
-        np.where(
-            penalty_logits > 0,
-            penalty_logits/repetition_penalty,
-            penalty_logits*repetition_penalty,
-        ),
+        penalty_logits - np.log(repetition_penalty),
         penalty_logits,
     )
     # Finally, put those penalized logit values back into their original
@@ -368,11 +364,7 @@ def apply_repetition_penalty_static(logits, tokens, repetition_penalty, generate
     # with negative logits to become more likely, which is obviously wrong)
     penalty_logits = jnp.where(
         penalty_arange >= 0,
-        jnp.where(
-            penalty_logits > 0,
-            penalty_logits/repetition_penalty,
-            penalty_logits*repetition_penalty,
-        ),
+        penalty_logits - jnp.log(repetition_penalty),
         penalty_logits,
     )
     # Finally, put those penalized logit values back into their original
